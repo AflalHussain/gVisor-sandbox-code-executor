@@ -1,0 +1,523 @@
+openapi: 3.0.3
+info:
+  title: Secure Code Execution Sandboxing API
+  version: "1.0"
+  description: >
+    API for executing untrusted Python or shell code in a gVisor-backed container,
+    with optional session-scoped persistent workspaces and file staging endpoints.
+servers:
+  - url: http://localhost:8088
+    description: Local development server
+tags:
+  - name: Execution
+  - name: Workspace Files
+  - name: Sessions
+security:
+  - ApiKeyAuth: []
+paths:
+  /api/v1/execute:
+    post:
+      tags: [Execution]
+      summary: Execute untrusted code
+      description: Executes Python or shell code inside the sandbox container.
+      operationId: executeUntrustedPayload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CodeExecutionRequest'
+            examples:
+              python:
+                summary: Python execution
+                value:
+                  type: python
+                  session_id: session_abc123
+                  persist_workspace: true
+                  install_packages: []
+                  code: |
+                    print("hello from python")
+              shell:
+                summary: Shell execution
+                value:
+                  type: shell
+                  session_id: session_abc123
+                  persist_workspace: true
+                  code: cat /workspace/inputs/data.txt
+      responses:
+        '200':
+          description: Execution completed and returned a JSON payload.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/ExecutionResult'
+                  - $ref: '#/components/schemas/ErrorResult'
+                  - $ref: '#/components/schemas/RuntimeCrashResult'
+        '400':
+          description: Unsupported execution type or bad request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationDetail'
+        '403':
+          description: Invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationDetail'
+        '422':
+          description: Request body validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FastAPIValidationError'
+  /api/v1/session/{session_id}/files/write:
+    post:
+      tags: [Workspace Files]
+      summary: Write a file into a session workspace
+      description: Writes text or binary content into `/workspace` for the given session.
+      operationId: writeSessionFile
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkspaceWriteRequest'
+            examples:
+              text:
+                summary: Write a text file
+                value:
+                  path: inputs/report.txt
+                  content: "AI Agent Intelligence Report Data"
+                  encoding: utf-8
+                  overwrite: true
+                  persist_workspace: true
+              binary:
+                summary: Write a base64-encoded binary file
+                value:
+                  path: uploads/sample.pdf
+                  content: JVBERi0xLjQKJ...
+                  encoding: base64
+                  overwrite: true
+                  persist_workspace: true
+      responses:
+        '200':
+          description: File write completed.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/WorkspaceWriteResult'
+                  - $ref: '#/components/schemas/WorkspaceOperationError'
+        '400':
+          description: Invalid path, encoding, or request shape.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationDetail'
+        '403':
+          description: Invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationDetail'
+        '422':
+          description: Request body validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FastAPIValidationError'
+  /api/v1/session/{session_id}/files/read:
+    post:
+      tags: [Workspace Files]
+      summary: Read a file from a session workspace
+      description: Reads a file from `/workspace` for the given session.
+      operationId: readSessionFile
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkspaceReadRequest'
+            examples:
+              text:
+                value:
+                  path: outputs/result.json
+                  encoding: utf-8
+                  persist_workspace: true
+              binary:
+                value:
+                  path: uploads/sample.pdf
+                  encoding: base64
+                  persist_workspace: true
+      responses:
+        '200':
+          description: File read completed.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/WorkspaceReadResult'
+                  - $ref: '#/components/schemas/WorkspaceOperationError'
+        '400':
+          description: Invalid path or encoding.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationDetail'
+        '403':
+          description: Invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationDetail'
+        '422':
+          description: Request body validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FastAPIValidationError'
+  /api/v1/session/{session_id}/files/list:
+    post:
+      tags: [Workspace Files]
+      summary: List files in a session workspace
+      description: Lists a file or directory inside `/workspace` for the given session.
+      operationId: listSessionFiles
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkspaceListRequest'
+            examples:
+              recursive:
+                value:
+                  path: .
+                  recursive: true
+                  persist_workspace: true
+              singleDirectory:
+                value:
+                  path: inputs
+                  recursive: false
+                  persist_workspace: true
+      responses:
+        '200':
+          description: Listing completed.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/WorkspaceListResult'
+                  - $ref: '#/components/schemas/WorkspaceOperationError'
+        '400':
+          description: Invalid path.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationDetail'
+        '403':
+          description: Invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationDetail'
+        '422':
+          description: Request body validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FastAPIValidationError'
+  /api/v1/session/{session_id}:
+    delete:
+      tags: [Sessions]
+      summary: Purge a persistent session workspace
+      description: Removes the Docker named volume backing the persistent workspace for the session.
+      operationId: closeAndPurgeSession
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: Session workspace purged.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionPurgeResult'
+        '403':
+          description: Invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationDetail'
+        '500':
+          description: Purge failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationDetail'
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  parameters:
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      description: Client-provided session identifier used to address a workspace.
+      schema:
+        type: string
+  schemas:
+    CodeExecutionRequest:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          description: The raw code snippet payload text to execute.
+        type:
+          type: string
+          description: Language runner profile target.
+          default: python
+          enum: [python, shell]
+        install_packages:
+          type: array
+          description: User-approved pip modules list.
+          default: []
+          items:
+            type: string
+        session_id:
+          type: string
+          nullable: true
+          description: Optional custom session ID used to address a workspace.
+        persist_workspace:
+          type: boolean
+          nullable: true
+          description: >
+            When true, reuses a Docker named volume for the session.
+            When omitted, the server default is used.
+    WorkspaceWriteRequest:
+      type: object
+      required: [path, content]
+      properties:
+        path:
+          type: string
+          description: Relative path inside /workspace.
+        content:
+          type: string
+          description: File content as utf-8 text or base64-encoded bytes.
+        encoding:
+          type: string
+          default: base64
+          enum: [utf-8, base64]
+        overwrite:
+          type: boolean
+          default: true
+          description: When false, the request fails if the file already exists.
+        persist_workspace:
+          type: boolean
+          nullable: true
+          description: >
+            When true, reuses a Docker named volume for the session.
+            When omitted, the server default is used.
+    WorkspaceReadRequest:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+          description: Relative path inside /workspace.
+        encoding:
+          type: string
+          default: base64
+          enum: [utf-8, base64]
+        persist_workspace:
+          type: boolean
+          nullable: true
+          description: >
+            When true, reads from the persistent workspace volume for the session.
+            When omitted, the server default is used.
+    WorkspaceListRequest:
+      type: object
+      properties:
+        path:
+          type: string
+          default: .
+          description: Relative file or directory path inside /workspace.
+        recursive:
+          type: boolean
+          default: true
+          description: When true, lists descendants recursively for directories.
+        persist_workspace:
+          type: boolean
+          nullable: true
+          description: >
+            When true, lists from the persistent workspace volume for the session.
+            When omitted, the server default is used.
+    ExecutionResult:
+      type: object
+      required: [stdout, stderr, exit_code, session_id, persist_workspace]
+      properties:
+        stdout:
+          type: string
+        stderr:
+          type: string
+        exit_code:
+          type: integer
+        session_id:
+          type: string
+        persist_workspace:
+          type: boolean
+    ErrorResult:
+      type: object
+      required: [error, session_id, persist_workspace]
+      properties:
+        error:
+          type: string
+        session_id:
+          type: string
+        persist_workspace:
+          type: boolean
+    RuntimeCrashResult:
+      type: object
+      required: [error, details, session_id, persist_workspace]
+      properties:
+        error:
+          type: string
+        details:
+          type: string
+        session_id:
+          type: string
+        persist_workspace:
+          type: boolean
+    WorkspaceWriteResult:
+      type: object
+      required: [status, path, bytes_written, session_id, persist_workspace]
+      properties:
+        status:
+          type: string
+          enum: [success]
+        path:
+          type: string
+        bytes_written:
+          type: integer
+        session_id:
+          type: string
+        persist_workspace:
+          type: boolean
+    WorkspaceReadResult:
+      type: object
+      required: [status, path, encoding, size, content, session_id, persist_workspace]
+      properties:
+        status:
+          type: string
+          enum: [success]
+        path:
+          type: string
+        encoding:
+          type: string
+          enum: [utf-8, base64]
+        size:
+          type: integer
+        content:
+          type: string
+        session_id:
+          type: string
+        persist_workspace:
+          type: boolean
+    WorkspaceEntry:
+      type: object
+      required: [path, type]
+      properties:
+        path:
+          type: string
+        type:
+          type: string
+          enum: [file, directory]
+        size:
+          type: integer
+          nullable: true
+    WorkspaceListResult:
+      type: object
+      required: [status, path, entries, session_id, persist_workspace]
+      properties:
+        status:
+          type: string
+          enum: [success]
+        path:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkspaceEntry'
+        session_id:
+          type: string
+        persist_workspace:
+          type: boolean
+    WorkspaceOperationError:
+      type: object
+      required: [error, session_id, persist_workspace]
+      properties:
+        error:
+          type: string
+        path:
+          type: string
+        details:
+          type: string
+        session_id:
+          type: string
+        persist_workspace:
+          type: boolean
+    SessionPurgeResult:
+      type: object
+      required: [status, message, volume, details]
+      properties:
+        status:
+          type: string
+          enum: [success]
+        message:
+          type: string
+        volume:
+          type: string
+        details:
+          type: string
+    HTTPValidationDetail:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                $ref: '#/components/schemas/FastAPIValidationIssue'
+    FastAPIValidationIssue:
+      type: object
+      required: [loc, msg, type]
+      properties:
+        loc:
+          type: array
+          items:
+            oneOf:
+              - type: string
+              - type: integer
+        msg:
+          type: string
+        type:
+          type: string
+    FastAPIValidationError:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: array
+          items:
+            $ref: '#/components/schemas/FastAPIValidationIssue'

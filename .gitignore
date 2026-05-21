@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+
+# IDE / agent tooling (optional but sensible)
+.agents/
+.codex/
+
+# Local runtime / logs
+gVisor-debug.log
+*.log
+
+# OS
+.DS_Store
