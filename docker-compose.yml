@@ -1,0 +1,16 @@
+services:
+  sandbox-api:
+    image: gvisor-sandbox-api-sandbox-api:latest
+    ports:
+      - "8088:8088"
+    environment:
+      - SANDBOX_API_KEY=${SANDBOX_API_KEY:-change-me}
+      - SANDBOX_LOG_LEVEL=${SANDBOX_LOG_LEVEL:-INFO}
+      - SANDBOX_PERSISTENT_WORKSPACE_DEFAULT=${SANDBOX_PERSISTENT_WORKSPACE_DEFAULT:-false}
+      - SANDBOX_VOLUME_PREFIX=${SANDBOX_VOLUME_PREFIX:-sandbox-session}
+    volumes:
+      # DooD: bind the host Docker socket so the API can spawn sibling containers
+      # via `docker run --runtime=runsc`. The sandbox-executor:latest image must
+      # already be built before running `docker compose up`.
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped

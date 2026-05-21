@@ -167,6 +167,66 @@ docker run --runtime=runsc --rm -it ubuntu dmesg
 
 If the second command prints lines beginning with `Starting gVisor...`, the runtime is active.
 
+## Docker Deployment
+
+The API service can be fully containerized using a **DooD (Docker-out-of-Docker)** pattern. The API container binds the host Docker socket so `sandbox_engine.py` can call `docker run --runtime=runsc` against the host daemon, spawning gVisor sandbox containers as siblings — not children.
+
+Two distinct images are involved:
+
+| Image | Dockerfile | Role |
+|---|---|---|
+| `sandbox-executor:latest` | `Dockerfile` | Runs untrusted code inside gVisor. Built once, used on-demand. |
+| `sandbox-api` (compose) | `Dockerfile.api` | Hosts the FastAPI service. Has Docker CLI, no daemon. |
+
+### Prerequisites
+
+The host must have gVisor installed and `runsc` registered with Docker (see [Host Prerequisites](#host-prerequisites) below). The API container changes nothing about this requirement.
+
+### Steps
+
+**1. Build the sandbox executor image** (must exist in the host daemon before the API starts):
+
+```bash
+docker build -t sandbox-executor:latest .
+```
+
+**2. Configure environment variables:**
+
+```bash
+cp .env.example .env
+# Edit .env and set SANDBOX_API_KEY to a real secret
+```
+
+**3. Build and start the API container:**
+
+```bash
+docker compose up --build -d
+```
+
+The API will be available at `http://localhost:8088`.
+
+### How it works
+
+```
+Client → API Container (port 8088)
+              ↓ docker run via /var/run/docker.sock
+         Host Docker Daemon
+              ↓ --runtime=runsc
+         Sandbox Container (sandbox-executor:latest)
+              ↓ named volume mount
+         sandbox-session-<hash> Docker volume
+```
+
+The socket bind (`/var/run/docker.sock:/var/run/docker.sock`) grants the API container full access to the host Docker daemon. Workspace volumes created by the engine persist in the host daemon's namespace across API container restarts.
+
+### Stop the service
+
+```bash
+docker compose down
+```
+
+---
+
 ## Setup
 
 ### 1. Install Python dependencies
