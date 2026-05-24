@@ -3,14 +3,19 @@ import json
 import logging
 import os
 import uuid
-from fastapi import FastAPI, HTTPException, Security, Depends
+from typing import Optional
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security.api_key import APIKeyHeader
-from pydantic import BaseModel, Field
-from typing import List, Optional
-from sandbox_engine import SandboxEngine
+from shared_models import (
+    CodeExecutionRequest,
+    WorkspaceListRequest,
+    WorkspaceReadRequest,
+    WorkspaceWriteRequest,
+)
+from worker_client import SandboxWorkerClient, WorkerServiceError
 
 app = FastAPI(title="Secure Code Execution Sandboxing API", version="1.0")
-engine = SandboxEngine()
+worker_client = SandboxWorkerClient()
 
 LOG_LEVEL = os.getenv("SANDBOX_LOG_LEVEL", "DEBUG").upper()
 logging.basicConfig(
@@ -32,7 +37,8 @@ async def verify_api_key(header_key: str = Depends(api_key_header)):
 
 
 def _resolved_persist_workspace(request_value: Optional[bool]) -> bool:
-    return request_value if request_value is not None else engine.default_persist_workspace
+    default_value = os.getenv("SANDBOX_PERSISTENT_WORKSPACE_DEFAULT", "false").lower() == "true"
+    return request_value if request_value is not None else default_value
 
 
 def _format_code_debug(request_id: str, session_id: str, run_type: str, code: str) -> str:
@@ -109,42 +115,8 @@ def _result_summary(result: dict) -> dict:
         summary["size"] = result["size"]
     return summary
 
-# Define Data Input Validation Structures
-class CodeExecutionRequest(BaseModel):
-    code: str = Field(..., description="The raw code snippet payload text to execute.")
-    type: str = Field("python", description="Language runner profile target: 'python' or 'shell'.")
-    install_packages: Optional[List[str]] = Field(default=[], description="User-approved pip modules list.")
-    session_id: Optional[str] = Field(default=None, description="Optional custom session ID used to address a workspace.")
-    persist_workspace: Optional[bool] = Field(
-        default=None,
-        description="When true, reuses a Docker named volume for the session. When omitted, the server default is used."
-    )
-
-class WorkspaceWriteRequest(BaseModel):
-    path: str = Field(..., description="Relative path inside /workspace.")
-    content: str = Field(..., description="File content as utf-8 text or base64-encoded bytes.")
-    encoding: str = Field("base64", description="'utf-8' for text or 'base64' for arbitrary binary files.")
-    overwrite: bool = Field(True, description="When false, the request fails if the file already exists.")
-    persist_workspace: Optional[bool] = Field(
-        default=None,
-        description="When true, reuses a Docker named volume for the session. When omitted, the server default is used."
-    )
-
-class WorkspaceReadRequest(BaseModel):
-    path: str = Field(..., description="Relative path inside /workspace.")
-    encoding: str = Field("base64", description="'utf-8' for text or 'base64' for arbitrary binary files.")
-    persist_workspace: Optional[bool] = Field(
-        default=None,
-        description="When true, reads from the persistent workspace volume for the session. When omitted, the server default is used."
-    )
-
-class WorkspaceListRequest(BaseModel):
-    path: str = Field(".", description="Relative file or directory path inside /workspace.")
-    recursive: bool = Field(True, description="When true, lists descendants recursively for directories.")
-    persist_workspace: Optional[bool] = Field(
-        default=None,
-        description="When true, lists from the persistent workspace volume for the session. When omitted, the server default is used."
-    )
+def _raise_worker_error(exc: WorkerServiceError):
+    raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 @app.post("/api/v1/execute", dependencies=[Depends(verify_api_key)])
 async def execute_untrusted_payload(request: CodeExecutionRequest):
@@ -174,13 +146,16 @@ async def execute_untrusted_payload(request: CodeExecutionRequest):
     logger.debug(_format_code_debug(request_id, session_id, request.type, request.code))
 
     # Fire off execution directly to our non-blocking sub-process engine
-    result = await engine.run_code_async(
-        code=request.code,
-        run_type=request.type,
-        allowed_pip=request.install_packages,
-        session_id=session_id,
-        persist_workspace=request.persist_workspace
-    )
+    try:
+        result = await worker_client.run_code_async(
+            code=request.code,
+            run_type=request.type,
+            allowed_pip=request.install_packages,
+            session_id=session_id,
+            persist_workspace=request.persist_workspace
+        )
+    except WorkerServiceError as exc:
+        _raise_worker_error(exc)
     
     # Append the active storage token tracking descriptor back to client context
     result["session_id"] = session_id
@@ -221,7 +196,7 @@ async def write_session_file(session_id: str, request: WorkspaceWriteRequest):
         )
     )
     try:
-        result = await engine.write_file_async(
+        result = await worker_client.write_file_async(
             session_id=session_id,
             path=request.path,
             content=request.content,
@@ -243,15 +218,8 @@ async def write_session_file(session_id: str, request: WorkspaceWriteRequest):
             )
         )
         return result
-    except ValueError as e:
-        logger.warning(
-            "write_file_validation_failed request_id=%s session_id=%s path=%s error=%s",
-            request_id,
-            session_id,
-            request.path,
-            str(e)
-        )
-        raise HTTPException(status_code=400, detail=str(e))
+    except WorkerServiceError as exc:
+        _raise_worker_error(exc)
 
 @app.post("/api/v1/session/{session_id}/files/read", dependencies=[Depends(verify_api_key)])
 async def read_session_file(session_id: str, request: WorkspaceReadRequest):
@@ -276,7 +244,7 @@ async def read_session_file(session_id: str, request: WorkspaceReadRequest):
         )
     )
     try:
-        result = await engine.read_file_async(
+        result = await worker_client.read_file_async(
             session_id=session_id,
             path=request.path,
             encoding=request.encoding,
@@ -296,15 +264,8 @@ async def read_session_file(session_id: str, request: WorkspaceReadRequest):
             )
         )
         return result
-    except ValueError as e:
-        logger.warning(
-            "read_file_validation_failed request_id=%s session_id=%s path=%s error=%s",
-            request_id,
-            session_id,
-            request.path,
-            str(e)
-        )
-        raise HTTPException(status_code=400, detail=str(e))
+    except WorkerServiceError as exc:
+        _raise_worker_error(exc)
 
 @app.post("/api/v1/session/{session_id}/files/list", dependencies=[Depends(verify_api_key)])
 async def list_session_files(session_id: str, request: WorkspaceListRequest):
@@ -329,7 +290,7 @@ async def list_session_files(session_id: str, request: WorkspaceListRequest):
         )
     )
     try:
-        result = await engine.list_files_async(
+        result = await worker_client.list_files_async(
             session_id=session_id,
             path=request.path,
             recursive=request.recursive,
@@ -349,15 +310,8 @@ async def list_session_files(session_id: str, request: WorkspaceListRequest):
             )
         )
         return result
-    except ValueError as e:
-        logger.warning(
-            "list_files_validation_failed request_id=%s session_id=%s path=%s error=%s",
-            request_id,
-            session_id,
-            request.path,
-            str(e)
-        )
-        raise HTTPException(status_code=400, detail=str(e))
+    except WorkerServiceError as exc:
+        _raise_worker_error(exc)
 
 @app.delete("/api/v1/session/{session_id}", dependencies=[Depends(verify_api_key)])
 async def close_and_purge_session(session_id: str):
@@ -370,7 +324,7 @@ async def close_and_purge_session(session_id: str):
         )
     )
     try:
-        purge_result = await engine.purge_workspace_async(session_id)
+        purge_result = await worker_client.purge_workspace_async(session_id)
         result = {
             "status": "success",
             "message": f"Workspace storage data bucket for {session_id} successfully purged.",
@@ -388,6 +342,8 @@ async def close_and_purge_session(session_id: str):
             )
         )
         return result
+    except WorkerServiceError as exc:
+        _raise_worker_error(exc)
     except Exception as e:
         logger.exception(
             "purge_session_failed request_id=%s session_id=%s error=%s",

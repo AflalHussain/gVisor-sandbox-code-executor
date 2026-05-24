@@ -2,7 +2,7 @@
 
 A small FastAPI service for running untrusted Python or shell code inside a gVisor-backed Docker container, with optional session-based persistent workspaces and file staging endpoints.
 
-This project is designed to be used directly over HTTP or through the included Open WebUI tool file, [`openwebui_sandbox_tools.py`](/hms/apps/sandbox-test/openwebui_sandbox_tools.py:1).
+This project is designed to be used directly over HTTP or through the included Open WebUI tool file, [`openwebui_sandbox_tools.py`](/hms/apps/gvisor-sandbox-api/openwebui_sandbox_tools.py:1).
 
 ## What It Does
 
@@ -10,26 +10,88 @@ This project is designed to be used directly over HTTP or through the included O
 - Supports optional per-session persistent workspaces mounted at `/workspace`
 - Lets clients write, read, list, and purge workspace files over HTTP
 - Uses API key authentication via the `X-API-Key` header
+- Uses a private worker service for all Docker/gVisor orchestration
 - Includes an OpenAPI spec and an Open WebUI tool wrapper
 
 ## Project Layout
 
-- [`api_gateway.py`](/hms/apps/sandbox-test/api_gateway.py:1): FastAPI app and HTTP endpoints
-- [`sandbox_engine.py`](/hms/apps/sandbox-test/sandbox_engine.py:1): Docker/gVisor orchestration layer
-- [`executor.py`](/hms/apps/sandbox-test/executor.py:1): Code that runs inside the sandbox container
-- [`openwebui_sandbox_tools.py`](/hms/apps/sandbox-test/openwebui_sandbox_tools.py:1): Open WebUI tool integration
-- [`openapi.yaml`](/hms/apps/sandbox-test/openapi.yaml:1): API contract
-- [`tests/`](/hms/apps/sandbox-test/tests): unit and integration tests
+- [`api_gateway.py`](/hms/apps/gvisor-sandbox-api/api_gateway.py:1): public FastAPI gateway and HTTP endpoints
+- [`worker_service.py`](/hms/apps/gvisor-sandbox-api/worker_service.py:1): private worker service with Docker access
+- [`sandbox_engine.py`](/hms/apps/gvisor-sandbox-api/sandbox_engine.py:1): Docker/gVisor orchestration layer
+- [`worker_client.py`](/hms/apps/gvisor-sandbox-api/worker_client.py:1): API-to-worker HTTP client
+- [`executor.py`](/hms/apps/gvisor-sandbox-api/executor.py:1): code that runs inside the sandbox container
+- [`openwebui_sandbox_tools.py`](/hms/apps/gvisor-sandbox-api/openwebui_sandbox_tools.py:1): Open WebUI tool integration
+- [`openapi.yaml`](/hms/apps/gvisor-sandbox-api/openapi.yaml:1): API contract
+- [`tests/`](/hms/apps/gvisor-sandbox-api/tests): unit and integration tests
 
 ## How It Works
 
 1. A client sends code to `POST /api/v1/execute`.
-2. The API validates the request and forwards it to `SandboxEngine`.
-3. `SandboxEngine` starts a Docker container with gVisor (`runsc`).
-4. The request payload is piped through `stdin` into [`executor.py`](/hms/apps/sandbox-test/executor.py:1).
+2. The public API validates the request and forwards it to the private worker service.
+3. The worker uses `SandboxEngine` to start a Docker container with gVisor (`runsc`).
+4. The request payload is piped through `stdin` into [`executor.py`](/hms/apps/gvisor-sandbox-api/executor.py:1).
 5. The executor optionally installs approved pip packages, runs the code, and returns JSON.
 
 For workspace operations, the engine launches short-lived helper containers that mount the same `/workspace` volume and perform file reads/writes/listing safely inside the sandbox boundary.
+
+## Architecture Diagrams
+
+### Service Topology
+
+```mermaid
+flowchart LR
+    Client[Client / Open WebUI / HTTP caller] --> API[Public FastAPI API<br/>api_gateway.py]
+    API -->|Internal HTTP + X-Worker-Auth| Worker[Private Worker<br/>worker_service.py]
+    Worker --> Engine[SandboxEngine]
+    Engine -->|docker run --runtime=runsc| Docker[Host Docker Daemon]
+    Docker --> Sandbox[gVisor Sandbox Container<br/>sandbox-executor:latest]
+    Sandbox --> Workspace["/workspace volume"]
+```
+
+### Trust Boundary
+
+```mermaid
+flowchart TB
+    subgraph Public["Publicly reachable"]
+        API[API container<br/>port 8088]
+    end
+
+    subgraph Private["Private internal network"]
+        Worker[Worker container<br/>port 8081 exposed only internally]
+    end
+
+    subgraph Host["Host-level control plane"]
+        Socket["/var/run/docker.sock"]
+        Docker[Docker daemon]
+        Runtime[gVisor runtime<br/>runsc]
+    end
+
+    API -->|authenticated internal request| Worker
+    Worker --> Socket
+    Socket --> Docker
+    Docker --> Runtime
+```
+
+### Request Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as Public API
+    participant W as Worker
+    participant E as SandboxEngine
+    participant D as Docker/runsc
+    participant X as executor.py
+
+    C->>A: POST /api/v1/execute + X-API-Key
+    A->>A: validate request
+    A->>W: POST /internal/v1/execute + X-Worker-Auth
+    W->>E: run_code_async(...)
+    E->>D: docker run --runtime=runsc ...
+    D->>X: start sandbox-executor
+    W-->>A: structured JSON result
+    A-->>C: external API response
+```
 
 ## Security Model
 
@@ -45,9 +107,10 @@ Current protections in code:
 
 Important notes:
 
-- Code execution containers use `--network=bridge` and `--dns=8.8.8.8`, so executed code can reach the network unless you change that behavior in [`sandbox_engine.py`](/hms/apps/sandbox-test/sandbox_engine.py:74).
+- The public API no longer mounts `/var/run/docker.sock`; only the private worker does.
+- Code execution containers use `--network=bridge` and `--dns=8.8.8.8`, so executed code can reach the network unless you change that behavior in [`sandbox_engine.py`](/hms/apps/gvisor-sandbox-api/sandbox_engine.py:74).
 - Dynamic `pip install` is allowed for packages explicitly passed in `install_packages`.
-- The `--pids-limit` setting is currently commented out in [`sandbox_engine.py`](/hms/apps/sandbox-test/sandbox_engine.py:87).
+- The `--pids-limit` setting is currently commented out in [`sandbox_engine.py`](/hms/apps/gvisor-sandbox-api/sandbox_engine.py:87).
 
 ## Requirements
 
@@ -62,7 +125,7 @@ Host prerequisites:
 - Linux kernel `4.14.77+`
 - Docker `17.09.0+`
 
-Python dependencies are listed in [`requirements.txt`](/hms/apps/sandbox-test/requirements.txt:1):
+Python dependencies are listed in [`requirements.txt`](/hms/apps/gvisor-sandbox-api/requirements.txt:1):
 
 - `fastapi`
 - `httpx`
@@ -169,14 +232,15 @@ If the second command prints lines beginning with `Starting gVisor...`, the runt
 
 ## Docker Deployment
 
-The API service can be fully containerized using a **DooD (Docker-out-of-Docker)** pattern. The API container binds the host Docker socket so `sandbox_engine.py` can call `docker run --runtime=runsc` against the host daemon, spawning gVisor sandbox containers as siblings — not children.
+The API service is containerized as a public gateway plus a private worker. The worker binds the host Docker socket so `sandbox_engine.py` can call `docker run --runtime=runsc` against the host daemon, spawning gVisor sandbox containers as siblings.
 
 Two distinct images are involved:
 
 | Image | Dockerfile | Role |
 |---|---|---|
 | `sandbox-executor:latest` | `Dockerfile` | Runs untrusted code inside gVisor. Built once, used on-demand. |
-| `sandbox-api` (compose) | `Dockerfile.api` | Hosts the FastAPI service. Has Docker CLI, no daemon. |
+| `sandbox-api` (compose) | `Dockerfile.api` | Hosts the public FastAPI service. No Docker socket access. |
+| `sandbox-worker` (compose) | `Dockerfile.worker` | Hosts the private worker service. Has Docker CLI and Docker socket access. |
 
 ### Prerequisites
 
@@ -194,7 +258,7 @@ docker build -t sandbox-executor:latest .
 
 ```bash
 cp .env.example .env
-# Edit .env and set SANDBOX_API_KEY to a real secret
+# Edit .env and set SANDBOX_API_KEY and SANDBOX_WORKER_API_KEY to real secrets
 ```
 
 **3. Build and start the API container:**
@@ -207,17 +271,16 @@ The API will be available at `http://localhost:8088`.
 
 ### How it works
 
-```
-Client → API Container (port 8088)
-              ↓ docker run via /var/run/docker.sock
-         Host Docker Daemon
-              ↓ --runtime=runsc
-         Sandbox Container (sandbox-executor:latest)
-              ↓ named volume mount
-         sandbox-session-<hash> Docker volume
+```mermaid
+flowchart TD
+    Client[Client] --> API[API container :8088]
+    API -->|SANDBOX_WORKER_URL + X-Worker-Auth| Worker[Worker container :8081]
+    Worker -->|/var/run/docker.sock| Docker[Host Docker daemon]
+    Docker -->|--runtime=runsc| Sandbox[sandbox-executor:latest]
+    Sandbox --> Volume[sandbox-session-<hash> volume]
 ```
 
-The socket bind (`/var/run/docker.sock:/var/run/docker.sock`) grants the API container full access to the host Docker daemon. Workspace volumes created by the engine persist in the host daemon's namespace across API container restarts.
+The socket bind (`/var/run/docker.sock:/var/run/docker.sock`) now exists only on the worker container. Workspace volumes created by the engine persist in the host daemon's namespace across API or worker container restarts.
 
 ### Stop the service
 
@@ -247,6 +310,9 @@ docker build -t sandbox-executor:latest .
 
 ```bash
 export SANDBOX_API_KEY="change-me"
+export SANDBOX_WORKER_API_KEY="change-me-worker-secret"
+export SANDBOX_WORKER_URL="http://127.0.0.1:8081"
+export SANDBOX_WORKER_TIMEOUT_SECONDS="90"
 export SANDBOX_LOG_LEVEL="INFO"
 export SANDBOX_PERSISTENT_WORKSPACE_DEFAULT="false"
 export SANDBOX_VOLUME_PREFIX="sandbox-session"
@@ -255,17 +321,27 @@ export SANDBOX_VOLUME_PREFIX="sandbox-session"
 Available environment variables:
 
 - `SANDBOX_API_KEY`: API key required by the service
+- `SANDBOX_WORKER_API_KEY`: shared secret between the public API and the private worker
+- `SANDBOX_WORKER_URL`: base URL the public API uses to reach the worker
+- `SANDBOX_WORKER_TIMEOUT_SECONDS`: timeout for API-to-worker calls
 - `SANDBOX_LOG_LEVEL`: logging level for the API
 - `SANDBOX_PERSISTENT_WORKSPACE_DEFAULT`: default workspace persistence when the request omits `persist_workspace`
 - `SANDBOX_VOLUME_PREFIX`: prefix used when naming persistent Docker volumes
 
-### 4. Run the API
+### 4. Run the worker
+
+```bash
+uvicorn worker_service:app --host 127.0.0.1 --port 8081 --reload
+```
+
+### 5. Run the API
 
 ```bash
 uvicorn api_gateway:app --host 0.0.0.0 --port 8088 --reload
 ```
 
 The API will be available at `http://localhost:8088`.
+The worker should remain private; if you run both locally, keep it bound to a trusted interface only.
 
 ## API Overview
 
@@ -371,7 +447,7 @@ curl -X DELETE http://localhost:8088/api/v1/session/demo-session \
 
 ## Open WebUI Integration
 
-This repo includes [`openwebui_sandbox_tools.py`](/hms/apps/sandbox-test/openwebui_sandbox_tools.py:1), which exposes the sandbox API as Open WebUI tools:
+This repo includes [`openwebui_sandbox_tools.py`](/hms/apps/gvisor-sandbox-api/openwebui_sandbox_tools.py:1), which exposes the sandbox API as Open WebUI tools:
 
 - `execute_code`
 - `write_workspace_file`
@@ -424,12 +500,13 @@ The integration tests cover:
 - If `docker run --runtime=runsc ...` fails before this app even starts, fix the host gVisor installation first.
 - If Docker cannot start containers with `--runtime=runsc`, verify gVisor is installed and Docker knows about the `runsc` runtime.
 - If API calls return `403`, check `X-API-Key` and `SANDBOX_API_KEY`.
+- If the public API returns worker connectivity errors, verify `SANDBOX_WORKER_URL`, `SANDBOX_WORKER_API_KEY`, and that the worker is reachable only from the intended private network or local interface.
 - If persistent workspace behavior seems inconsistent, confirm `persist_workspace` is being sent explicitly and that `SANDBOX_PERSISTENT_WORKSPACE_DEFAULT` matches your expectation.
 - If Open WebUI tool calls fail, verify `SANDBOX_API_BASE_URL` points to this service and the API key matches.
 
 ## See Also
 
-- [`README_AI.md`](/hms/apps/sandbox-test/README_AI.md:1) for the original AI-oriented architecture notes
-- [`openapi.yaml`](/hms/apps/sandbox-test/openapi.yaml:1) for the machine-readable API specification
+- [`README_AI.md`](/hms/apps/gvisor-sandbox-api/README_AI.md:1) for the original AI-oriented architecture notes
+- [`openapi.yaml`](/hms/apps/gvisor-sandbox-api/openapi.yaml:1) for the machine-readable API specification
 - Official gVisor installation guide: https://gvisor.dev/docs/user_guide/install/
 - Official gVisor Docker quick start: https://gvisor.dev/docs/user_guide/quick_start/docker/

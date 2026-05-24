@@ -1,5 +1,8 @@
 services:
   sandbox-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
     image: gvisor-sandbox-api-sandbox-api:latest
     ports:
       - "8088:8088"
@@ -8,9 +11,33 @@ services:
       - SANDBOX_LOG_LEVEL=${SANDBOX_LOG_LEVEL:-INFO}
       - SANDBOX_PERSISTENT_WORKSPACE_DEFAULT=${SANDBOX_PERSISTENT_WORKSPACE_DEFAULT:-false}
       - SANDBOX_VOLUME_PREFIX=${SANDBOX_VOLUME_PREFIX:-sandbox-session}
-    volumes:
-      # DooD: bind the host Docker socket so the API can spawn sibling containers
-      # via `docker run --runtime=runsc`. The sandbox-executor:latest image must
-      # already be built before running `docker compose up`.
-      - /var/run/docker.sock:/var/run/docker.sock
+      - SANDBOX_WORKER_URL=${SANDBOX_WORKER_URL:-http://sandbox-worker:8081}
+      - SANDBOX_WORKER_API_KEY=${SANDBOX_WORKER_API_KEY:-change-me-worker-secret}
+      - SANDBOX_WORKER_TIMEOUT_SECONDS=${SANDBOX_WORKER_TIMEOUT_SECONDS:-90}
+    depends_on:
+      - sandbox-worker
+    networks:
+      - sandbox-internal
     restart: unless-stopped
+
+  sandbox-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: gvisor-sandbox-api-sandbox-worker:latest
+    environment:
+      - SANDBOX_LOG_LEVEL=${SANDBOX_LOG_LEVEL:-INFO}
+      - SANDBOX_PERSISTENT_WORKSPACE_DEFAULT=${SANDBOX_PERSISTENT_WORKSPACE_DEFAULT:-false}
+      - SANDBOX_VOLUME_PREFIX=${SANDBOX_VOLUME_PREFIX:-sandbox-session}
+      - SANDBOX_WORKER_API_KEY=${SANDBOX_WORKER_API_KEY:-change-me-worker-secret}
+    expose:
+      - "8081"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - sandbox-internal
+    restart: unless-stopped
+
+networks:
+  sandbox-internal:
+    driver: bridge
